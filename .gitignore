@@ -1,16 +1,9 @@
-# Secrets
 .env
-
-# Python
 .venv/
 __pycache__/
-
-# Node / build
 node_modules/
-dist/
-
-# Local artifacts
 *.zip
-output/
-.claude/
-.DS_Store
+*.db
+
+# The app needs this database at runtime (backend/tools.py)
+!data/yale_som.db

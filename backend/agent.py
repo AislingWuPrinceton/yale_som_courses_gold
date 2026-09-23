@@ -1,242 +1,172 @@
-"""The Yale SOM course agent: pydantic-ai + gpt-6-astra through Portkey.
+"""Yale SOM course agent: PydanticAI + gpt-6-astra through Portkey.
 
-main.py imports `run_agent` from here and expects a dict shaped like
-`{"reply": str, "tools_used": list[str]}`.
+Tools: search_courses (tools.py) and web_search (OpenAI's native web search).
+Every run is appended to output/audit_trail.json.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
+os.environ.setdefault("PYDANTIC_AI_NO_BANNER", "1")
+
+from dotenv import load_dotenv  # noqa: E402
+from openai import AsyncOpenAI  # noqa: E402
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import NativeTool
+from pydantic_ai.capabilities import WebSearch
 from pydantic_ai.messages import (
-    NativeToolCallPart,
-    NativeToolReturnPart,
+    BaseToolCallPart,
+    BaseToolReturnPart,
+    ModelRequest,
+    ModelResponse,
+    RetryPromptPart,
     TextPart,
     ThinkingPart,
-    ToolCallPart,
-    ToolReturnPart,
 )
-from pydantic_ai.models.openai import (
-    OpenAIResponsesModel,
-    OpenAIResponsesModelSettings,
-)
-from pydantic_ai.native_tools import WebSearchTool
+from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.usage import UsageLimits
+from pydantic_core import to_json
 
-from models import AgentResult, AuditEntry, ToolCallRecord
+from models import AgentResult
 from tools import search_courses
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-PROMPT_PATH = HERE / "prompts" / "prompt.md"
-AUDIT_PATH = ROOT / "output" / "audit_trail.json"
-
-# The key may sit in this lecture folder or any folder above it (the course
-# root, e.g. MGT409/.env). Load every .env on the way up; nearest wins.
-for _folder in (HERE, *ROOT.parents[::-1], ROOT):
-    _candidate = _folder / ".env"
-    if _candidate.is_file():
-        load_dotenv(_candidate, override=True)
+load_dotenv(ROOT / ".env")
+load_dotenv(ROOT.parent / ".env")
 
 MODEL_NAME = "gpt-6-astra"
-PORTKEY_BASE_URL = "https://api.portkey.ai/v1"
+PORTKEY_BASE_URL = os.getenv("PORTKEY_BASE_URL", "https://api.portkey.ai/v1").rstrip("/")
+PROMPT_PATH = HERE / "prompts" / "prompt.md"
+AUDIT_PATH = ROOT / "output" / "audit_trail.json"
+MAX_MODEL_REQUESTS = 20  # web_search often needs several rounds (open_page, search, refine)
+RESULT_PREVIEW_CHARS = 300
 
-# The catalog tool keeps its own name; OpenAI's native web search reports
-# under a provider-specific name, which we normalize to this for the UI.
-WEB_SEARCH_LABEL = "web_search"
+_audit_lock = threading.Lock()
 
 
-def _build_agent() -> Agent:
-    api_key = os.environ.get("PORTKEY_API_KEY")
+def _build_agent() -> Agent[None, str]:
+    api_key = os.getenv("PORTKEY_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError(
-            "PORTKEY_API_KEY is not set. Put it in a .env file in this "
-            "lecture folder or any folder above it (see .env.example)."
-        )
+        raise RuntimeError("PORTKEY_API_KEY is not set (put it in a .env file).")
     client = AsyncOpenAI(
         api_key=api_key,
         base_url=PORTKEY_BASE_URL,
         default_headers={"x-portkey-api-key": api_key},
     )
-    model = OpenAIResponsesModel(
-        MODEL_NAME,
-        provider=OpenAIProvider(openai_client=client),
-    )
+    model = OpenAIResponsesModel(MODEL_NAME, provider=OpenAIProvider(openai_client=client))
     return Agent(
         model,
-        name="yale_som_course_agent",
-        # Ask for reasoning summaries so the audit trail can record thoughts.
-        model_settings=OpenAIResponsesModelSettings(
-            openai_reasoning_summary="auto",
-        ),
         instructions=PROMPT_PATH.read_text(encoding="utf-8"),
         tools=[search_courses],
-        capabilities=[NativeTool(WebSearchTool())],
+        capabilities=[WebSearch()],  # native OpenAI web search (no local fallback)
+        model_settings=OpenAIResponsesModelSettings(openai_reasoning_summary="auto"),
     )
 
 
-_agent: Agent | None = None
+def _tool_label(name: str) -> str:
+    """Native web-search calls show up under names like 'web_search' or 'web_search_call'."""
+    return "web_search" if name.startswith("web_search") else name
 
 
-def get_agent() -> Agent:
-    """Build the agent once, lazily, so imports never need the API key."""
-    global _agent
-    if _agent is None:
-        _agent = _build_agent()
-    return _agent
-
-
-def _short(value: Any, limit: int = 400) -> str:
-    """Render a tool result as a short string for the audit trail."""
-    if isinstance(value, (list, tuple)):
-        text = f"{len(value)} item(s): " + json.dumps(
-            [_label(v) for v in value[:5]], ensure_ascii=False, default=str
-        )
-    elif isinstance(value, (dict, str, int, float, bool)) or value is None:
-        text = value if isinstance(value, str) else json.dumps(
-            value, ensure_ascii=False, default=str
-        )
-    else:
-        text = str(value)
+def _preview(value: Any) -> str:
+    text = value if isinstance(value, str) else to_json(value).decode("utf-8", "replace")
     text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + "…"
+    return text if len(text) <= RESULT_PREVIEW_CHARS else text[: RESULT_PREVIEW_CHARS - 1] + "…"
 
 
-def _label(item: Any) -> str:
-    """One-line label for a course (or anything else) inside a result list."""
-    number = getattr(item, "number", None)
-    title = getattr(item, "title", None)
-    if number or title:
-        return f"{number} {title}".strip()
-    return str(item)[:80]
-
-
-def _as_dict(args: Any) -> dict[str, Any]:
-    if isinstance(args, dict):
-        return args
-    if isinstance(args, str):
-        try:
-            parsed = json.loads(args)
-        except json.JSONDecodeError:
-            return {"raw": args}
-        return parsed if isinstance(parsed, dict) else {"raw": parsed}
-    return {} if args is None else {"raw": str(args)}
-
-
-def _inspect_run(result: Any) -> tuple[list[str], list[ToolCallRecord], list[str], str]:
-    """Pull thoughts, tool calls, tool names and a stop reason out of a run."""
+def _summarize_run(messages: list[Any]) -> tuple[list[str], list[dict[str, Any]], str]:
+    """Pull thoughts, tool calls (name/args/short result) and the stop reason out of a run."""
     thoughts: list[str] = []
-    calls: list[ToolCallRecord] = []
-    tools_used: list[str] = []
-    stop_reason = ""
-    pending: dict[str, ToolCallRecord] = {}
+    calls: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    finish_reason: str | None = None
 
-    for message in result.all_messages():
-        for part in getattr(message, "parts", []):
-            if isinstance(part, ThinkingPart) and part.content:
-                thoughts.append(part.content)
-
-            elif isinstance(part, (ToolCallPart, NativeToolCallPart)):
-                native = isinstance(part, NativeToolCallPart)
-                name = WEB_SEARCH_LABEL if native else part.tool_name
-                record = ToolCallRecord(tool=name, args=_as_dict(part.args))
-                calls.append(record)
-                if part.tool_call_id:
-                    pending[part.tool_call_id] = record
-                if name not in tools_used:
-                    tools_used.append(name)
-
-            elif isinstance(part, (ToolReturnPart, NativeToolReturnPart)):
-                record = pending.get(part.tool_call_id)
-                if record is not None:
-                    record.result = _short(part.content)
-
-        reason = getattr(message, "finish_reason", None)
-        if reason:
-            stop_reason = str(reason)
-
-    return thoughts, calls, tools_used, stop_reason or "completed"
-
-
-def _append_audit(entry: AuditEntry) -> None:
-    """Append one row to output/audit_trail.json, never wiping earlier rows."""
-    AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    if AUDIT_PATH.exists():
-        try:
-            loaded = json.loads(AUDIT_PATH.read_text(encoding="utf-8") or "[]")
-            if isinstance(loaded, list):
-                rows = loaded
-            else:
-                rows = [loaded]
-        except json.JSONDecodeError:
-            # Keep the unreadable file instead of destroying its contents.
-            AUDIT_PATH.replace(AUDIT_PATH.with_suffix(".corrupt.json"))
-            rows = []
-    rows.append(entry.model_dump())
-    AUDIT_PATH.write_text(
-        json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8"
+    last_response = max(
+        (i for i, m in enumerate(messages) if isinstance(m, ModelResponse)), default=-1
     )
+    for index, message in enumerate(messages):
+        if isinstance(message, ModelResponse):
+            finish_reason = message.finish_reason
+            has_calls = any(isinstance(p, BaseToolCallPart) for p in message.parts)
+            for part in message.parts:
+                if isinstance(part, ThinkingPart) and part.content:
+                    thoughts.append(part.content)
+                elif isinstance(part, TextPart) and part.content:
+                    # Text before a tool call is a "thought"; the last response's text is the reply.
+                    if has_calls and index != last_response:
+                        thoughts.append(part.content)
+                elif isinstance(part, BaseToolCallPart):
+                    entry = {
+                        "tool": _tool_label(part.tool_name),
+                        "args": part.args_as_dict(),
+                        "result": None,
+                    }
+                    calls.append(entry)
+                    by_id[part.tool_call_id] = entry
+                elif isinstance(part, BaseToolReturnPart):
+                    # Native tools (web search) return their result inside the model response.
+                    entry = by_id.get(part.tool_call_id)
+                    if entry is not None:
+                        entry["result"] = _preview(part.content)
+        elif isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, (BaseToolReturnPart, RetryPromptPart)):
+                    entry = by_id.get(part.tool_call_id)
+                    if entry is not None:
+                        entry["result"] = _preview(part.content)
+
+    reason = f"final answer (finish_reason={finish_reason or 'stop'})"
+    return thoughts, calls, reason
+
+
+def _append_audit(entry: dict[str, Any]) -> None:
+    """Append one run to output/audit_trail.json without touching earlier rows."""
+    with _audit_lock:
+        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        rows: list[Any] = []
+        if AUDIT_PATH.exists() and AUDIT_PATH.stat().st_size > 0:
+            try:
+                loaded = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
+                rows = loaded if isinstance(loaded, list) else [loaded]
+            except json.JSONDecodeError:
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                AUDIT_PATH.replace(AUDIT_PATH.with_name(f"audit_trail.corrupt-{stamp}.json"))
+        rows.append(entry)
+        tmp = AUDIT_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(AUDIT_PATH)
 
 
 def run_agent(message: str) -> dict:
-    """Run one agent loop and record it in the audit trail."""
-    started = datetime.now(timezone.utc).isoformat()
-
+    entry: dict[str, Any] = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "user_message": message,
+        "model": MODEL_NAME,
+        "thoughts": [],
+        "tool_calls": [],
+        "stopped": "",
+        "reply": "",
+    }
     try:
-        result = get_agent().run_sync(message)
-    except Exception as exc:  # surface a readable error, never the API key
-        entry = AuditEntry(
-            time=started,
-            user_message=message,
-            reply="",
-            stop_reason=f"error: {type(exc).__name__}",
+        run = _build_agent().run_sync(
+            message, usage_limits=UsageLimits(request_limit=MAX_MODEL_REQUESTS)
         )
-        _append_audit(entry)
-        return AgentResult(
-            reply=(
-                "The course agent could not complete that request "
-                f"({type(exc).__name__}). Please try again."
-            ),
-            tools_used=[],
-        ).model_dump()
-
-    thoughts, calls, tools_used, stop_reason = _inspect_run(result)
-    reply = (result.output or "").strip()
-    if not reply:
-        reply = "".join(
-            part.content
-            for msg in result.all_messages()
-            for part in getattr(msg, "parts", [])
-            if isinstance(part, TextPart)
-        ).strip()
-
-    _append_audit(
-        AuditEntry(
-            time=started,
-            user_message=message,
-            thoughts=thoughts,
-            tool_calls=calls,
-            tools_used=tools_used,
-            reply=reply,
-            stop_reason=stop_reason,
+        thoughts, calls, stopped = _summarize_run(run.new_messages())
+        tools_used = list(dict.fromkeys(c["tool"] for c in calls))
+        result = AgentResult(reply=run.output, tools_used=tools_used)
+        entry.update(thoughts=thoughts, tool_calls=calls, stopped=stopped, reply=result.reply)
+    except Exception as exc:  # keep the chat alive; the audit trail records what happened
+        detail = f"{type(exc).__name__}: {exc}"[:400]
+        result = AgentResult(
+            reply=f"Sorry, the course agent hit an error and could not answer. ({detail})"
         )
-    )
-    return AgentResult(reply=reply, tools_used=tools_used).model_dump()
-
-
-if __name__ == "__main__":
-    import sys
-
-    question = " ".join(sys.argv[1:]) or "Who teaches Negotiations and when does it meet?"
-    out = run_agent(question)
-    print(out["reply"])
-    print("\ntools_used:", out["tools_used"])
+        entry.update(stopped=f"error: {detail}", reply=result.reply)
+    _append_audit(entry)
+    return result.model_dump()

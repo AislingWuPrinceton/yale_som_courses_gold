@@ -1,0 +1,3 @@
+Why did the neural network go to business school?
+
+It wanted to learn how to optimize its loss... and maximize its returns!

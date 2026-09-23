@@ -1,91 +1,55 @@
-// Thin client for the FastAPI backend (see backend/main.py).
+// VITE_API_BASE is what the Render static site sets; VITE_API_URL is kept for local setups.
+const API_URL = (
+  import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+).replace(/\/+$/, '')
 
-// Set VITE_API_BASE at build time (e.g. on Render) to point at the deployed backend.
-export const API_BASE: string =
-  import.meta.env.VITE_API_BASE?.replace(/\/+$/, "") || "http://127.0.0.1:8000";
-
-/** A row of data/yale_som_classes.json, exactly as the API returns it. */
+/** One row of data/yale_som_classes.json, as served by GET /api/courses. */
 export interface Course {
-  "Course ID": string;
-  "Course Number": string;
-  "Course Title": string;
-  "Course Description": string;
-  "Course Category": string;
-  "Course Type": string;
-  "Course Session": string;
-  "Course Session Start date": string;
-  "Course Session End Date": string;
-  Daytimes: string;
-  "Timings Day": string;
-  "Timings StartTime": string;
-  "Timings EndTime": string;
-  Room: string;
-  Section: string;
-  Units: string;
-  "Faculty 1": string;
-  "Faculty 1 Email": string;
-  faculty_bio: string;
-  Syllabus: string;
-  "Old Syllabus": string;
-  "Bid Or Permission": string;
-  TermCode: string;
-  Visible: string;
+  'Course ID': string
+  'Course Number': string
+  'Course Title': string
+  Section: string
+  'Course Category': string
+  'Course Type': string
+  'Bid Or Permission': string
+  'Course Session': string
+  Daytimes: string
+  Room: string
+  Units: string
+  'Faculty 1': string
+  'Faculty 1 Email': string
+  Syllabus: string
+  'Old Syllabus': string
+  'Course Description': string
+  faculty_bio: string
+  Visible: string
 }
 
 export interface CoursesResponse {
-  count: number;
-  courses: Course[];
+  count: number
+  courses: Course[]
 }
 
-export interface ChatResponse {
-  reply: string;
-  tools_used: string[];
+export interface ChatReply {
+  reply: string
+  tools_used: string[]
 }
 
-async function asJson<T>(res: Response): Promise<T> {
-  if (!res.ok) {
-    throw new Error(`${res.status} ${res.statusText}`);
-  }
-  return (await res.json()) as T;
+async function request<T>(path: string, init?: RequestInit, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${API_URL}${path}`, { ...init, signal })
+  if (!res.ok) throw new Error(`Server returned ${res.status}`)
+  return res.json() as Promise<T>
 }
 
-export async function fetchCourses(
-  q?: string,
-  signal?: AbortSignal,
-): Promise<CoursesResponse> {
-  const url = new URL("/api/courses", API_BASE);
-  if (q && q.trim()) url.searchParams.set("q", q.trim());
-  return asJson<CoursesResponse>(await fetch(url, { signal }));
+export function fetchCourses(q: string, signal?: AbortSignal): Promise<CoursesResponse> {
+  const query = q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ''
+  return request<CoursesResponse>(`/api/courses${query}`, undefined, signal)
 }
 
-export async function sendChat(
-  message: string,
-  signal?: AbortSignal,
-): Promise<ChatResponse> {
-  const res = await fetch(`${API_BASE}/api/chat`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+export function sendChat(message: string): Promise<ChatReply> {
+  return request<ChatReply>('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
-    signal,
-  });
-  return asJson<ChatResponse>(res);
-}
-
-/** A course's meeting time, or a clear "not listed" — never invented. */
-export function meetingTime(course: Course): string {
-  const daytimes = course.Daytimes?.trim();
-  if (daytimes) return daytimes.replace(/\s+/g, " ");
-  const day = course["Timings Day"]?.trim();
-  const start = course["Timings StartTime"]?.trim();
-  const end = course["Timings EndTime"]?.trim();
-  if (day && start) return `${day} ${start}${end ? `–${end}` : ""}`;
-  return "No meeting time listed";
-}
-
-/** "Simonsohn, Uri" -> "Uri Simonsohn" */
-export function displayFaculty(course: Course): string {
-  const raw = course["Faculty 1"]?.trim();
-  if (!raw) return "Instructor not listed";
-  const [last, first] = raw.split(",").map((s) => s.trim());
-  return first ? `${first} ${last}` : raw;
+  })
 }

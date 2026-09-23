@@ -1,116 +1,104 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchCourses, type Course } from "./api";
-import ChatPanel from "./components/ChatPanel";
-import CourseCard from "./components/CourseCard";
-import { LeafMark, SearchIcon } from "./components/icons";
+import { useEffect, useMemo, useState } from 'react'
+import { fetchCourses } from './api'
+import type { Course } from './api'
+import ChatPanel from './components/ChatPanel'
+import CourseCard from './components/CourseCard'
 
 export default function App() {
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const debounce = useRef<number | undefined>(undefined);
+  const [query, setQuery] = useState('')
+  const [courses, setCourses] = useState<Course[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [category, setCategory] = useState('All')
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    // Debounce so typing doesn't fire a request per keystroke.
-    window.clearTimeout(debounce.current);
-    debounce.current = window.setTimeout(() => {
-      setLoading(true);
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      setLoading(true)
       fetchCourses(query, controller.signal)
         .then((res) => {
-          setCourses(res.courses);
-          setError(null);
+          setCourses(res.courses)
+          setError('')
         })
-        .catch((err: unknown) => {
-          if (err instanceof DOMException && err.name === "AbortError") return;
-          setError(
-            err instanceof Error ? err.message : "Could not load courses",
-          );
+        .catch((e: unknown) => {
+          if (e instanceof DOMException && e.name === 'AbortError') return
+          setError('Could not load courses. Start the backend: uvicorn main:app --port 8000')
         })
-        .finally(() => setLoading(false));
-    }, 220);
-
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false)
+        })
+    }, 250)
     return () => {
-      controller.abort();
-      window.clearTimeout(debounce.current);
-    };
-  }, [query]);
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [query])
 
-  const countLabel = useMemo(() => {
-    if (loading) return "Loading…";
-    if (error) return "";
-    const n = courses.length;
-    return `${n} course${n === 1 ? "" : "s"}${query.trim() ? " matched" : ""}`;
-  }, [courses.length, loading, error, query]);
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const c of courses) counts.set(c['Course Category'], (counts.get(c['Course Category']) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1])
+  }, [courses])
+
+  const shown = category === 'All' ? courses : courses.filter((c) => c['Course Category'] === category)
 
   return (
-    <div className="app">
-      <header className="masthead">
-        <span className="mark">
-          <LeafMark />
-        </span>
-        <div>
-          <h1>Yale SOM Course Explorer</h1>
-          <p className="tagline">
-            Browse the catalog, then ask the{" "}
-            <span className="gold">course assistant</span> anything it can
-            answer from the data.
-          </p>
+    <>
+      <header className="hero">
+        <div className="hero__inner">
+          <p className="hero__eyebrow">Yale School of Management</p>
+          <h1>Course Explorer</h1>
+          <p className="hero__sub">Browse the full course list, or ask the assistant in the corner.</p>
+          <input
+            className="search"
+            type="search"
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value)
+              setCategory('All')
+            }}
+            placeholder="Search by title, number, professor, day…"
+            aria-label="Search courses"
+          />
         </div>
       </header>
 
-      <div className="layout">
-        <main>
-          <div className="toolbar">
-            <div className="search">
-              <SearchIcon />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search by title, number, professor, topic…"
-                aria-label="Search courses"
-              />
-            </div>
-            <span className="result-count">
-              {countLabel && <strong>{countLabel}</strong>}
-            </span>
-          </div>
+      <main className="main">
+        <div className="filters" role="group" aria-label="Filter by category">
+          <button type="button" className={category === 'All' ? 'is-on' : ''} onClick={() => setCategory('All')}>
+            All <span>{courses.length}</span>
+          </button>
+          {categories.map(([name, n]) => (
+            <button
+              key={name}
+              type="button"
+              className={category === name ? 'is-on' : ''}
+              onClick={() => setCategory(name)}
+            >
+              {name} <span>{n}</span>
+            </button>
+          ))}
+        </div>
 
-          {error && (
-            <div className="notice">
-              <strong>Can't reach the backend.</strong> Start it with{" "}
-              <code>uvicorn main:app --port 8000</code> from{" "}
-              <code>backend/</code>. ({error})
-            </div>
-          )}
+        {error ? <p className="notice notice--error">{error}</p> : null}
+        {loading && courses.length === 0 && !error ? <p className="notice">Loading courses…</p> : null}
+        {!loading && !error && shown.length === 0 ? <p className="notice">No courses match that search.</p> : null}
 
-          {loading && !error && (
-            <div className="grid">
-              {Array.from({ length: 6 }, (_, i) => (
-                <div key={i} className="skeleton" />
+        {!error ? (
+          <>
+            <p className="count">
+              {shown.length} {shown.length === 1 ? 'course' : 'courses'}
+            </p>
+            <div className={`grid ${loading ? 'grid--loading' : ''}`}>
+              {shown.map((c, i) => (
+                <CourseCard key={`${c['Course ID']}-${i}`} course={c} />
               ))}
             </div>
-          )}
+          </>
+        ) : null}
+      </main>
 
-          {!loading && !error && courses.length === 0 && (
-            <div className="notice">
-              No courses match <strong>{query}</strong>. Try a broader search.
-            </div>
-          )}
-
-          {!loading && !error && courses.length > 0 && (
-            <div className="grid">
-              {courses.map((c, i) => (
-                <CourseCard key={`${c["Course ID"]}-${c.Section}-${i}`} course={c} />
-              ))}
-            </div>
-          )}
-        </main>
-
-        <ChatPanel />
-      </div>
-    </div>
-  );
+      <ChatPanel />
+    </>
+  )
 }

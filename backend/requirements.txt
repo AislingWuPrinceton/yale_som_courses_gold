@@ -1,9 +1,5 @@
-# Yale SOM course explorer — backend
-# Install into this folder's virtual environment:
-#   python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
-
-fastapi>=0.141
-uvicorn[standard]>=0.38
-python-dotenv>=1.1
-pydantic>=2.13
-pydantic-ai-slim[openai]>=2.46
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic-ai-slim[openai]>=1.0.0
+python-dotenv>=1.0.1
+httpx>=0.27.0
