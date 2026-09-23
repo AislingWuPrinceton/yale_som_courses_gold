@@ -1,6 +1,8 @@
 // Thin client for the FastAPI backend (see backend/main.py).
 
-export const API_BASE = "http://127.0.0.1:8000";
+// Set VITE_API_BASE at build time (e.g. on Render) to point at the deployed backend.
+export const API_BASE: string =
+  import.meta.env.VITE_API_BASE?.replace(/\/+$/, "") || "http://127.0.0.1:8000";
 
 /** A row of data/yale_som_classes.json, exactly as the API returns it. */
 export interface Course {
