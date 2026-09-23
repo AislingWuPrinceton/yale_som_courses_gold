@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+
+# Node / build
+node_modules/
+dist/
+
+# Local artifacts
+*.zip
+output/
+.claude/
+.DS_Store
